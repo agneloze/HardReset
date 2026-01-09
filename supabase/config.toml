@@ -1,0 +1,10 @@
+project_id = "eizajitmzuytpaziqdkk"
+
+[functions]
+enabled = true
+
+[functions.predict-student-performance]
+verify_jwt = false
+
+[functions.send-notification-email]
+verify_jwt = false
