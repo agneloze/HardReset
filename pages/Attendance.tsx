@@ -1,0 +1,480 @@
+import { useEffect, useState } from "react";
+import { useNavigate } from "react-router-dom";
+import { supabase } from "@/integrations/supabase/client";
+import { useUserRole } from "@/hooks/useUserRole";
+import { TopTabs } from "@/components/layout/TopTabs";
+import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
+import { Button } from "@/components/ui/button";
+import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from "@/components/ui/select";
+import { Input } from "@/components/ui/input";
+import { Label } from "@/components/ui/label";
+import { Badge } from "@/components/ui/badge";
+import { useToast } from "@/hooks/use-toast";
+import { CheckCircle, XCircle, Clock, Save, AlertTriangle } from "lucide-react";
+import { LoadingSpinner } from "@/components/ui/loading-spinner";
+import { Progress } from "@/components/ui/progress";
+import { FloatingGeometry } from "@/components/ui/FloatingGeometry";
+
+export default function Attendance() {
+  const navigate = useNavigate();
+  const { toast } = useToast();
+  const { role, loading: roleLoading, userId } = useUserRole();
+  const [user, setUser] = useState<any>(null);
+  const [profile, setProfile] = useState<any>(null);
+  const [loading, setLoading] = useState(true);
+  const [students, setStudents] = useState<any[]>([]);
+  const [attendanceData, setAttendanceData] = useState<any>({});
+  
+  // Dynamic data from database
+  const [courses, setCourses] = useState<any[]>([]);
+  const [sections, setSections] = useState<any[]>([]);
+  const [subjects, setSubjects] = useState<any[]>([]);
+  
+  const [selectedCourse, setSelectedCourse] = useState("");
+  const [selectedYear, setSelectedYear] = useState("");
+  const [selectedSection, setSelectedSection] = useState("");
+  const [selectedSubject, setSelectedSubject] = useState("");
+  const [selectedDate, setSelectedDate] = useState(new Date().toISOString().split("T")[0]);
+
+  useEffect(() => {
+    checkAuth();
+  }, []);
+
+  useEffect(() => {
+    if (!roleLoading && role === "STUDENT" && userId) {
+      fetchStudentAttendance(userId);
+    }
+  }, [role, roleLoading, userId]);
+
+  const fetchDropdownData = async () => {
+    const [coursesRes, sectionsRes, subjectsRes] = await Promise.all([
+      supabase.from("courses").select("*").order("name"),
+      supabase.from("sections").select("*").order("name"),
+      supabase.from("subjects").select("*").order("name"),
+    ]);
+    setCourses(coursesRes.data || []);
+    setSections(sectionsRes.data || []);
+    setSubjects(subjectsRes.data || []);
+  };
+
+  const checkAuth = async () => {
+    try {
+      const { data: { session } } = await supabase.auth.getSession();
+      
+      if (!session) {
+        navigate("/auth");
+        return;
+      }
+
+      setUser(session.user);
+
+      const { data: profileData, error: profileError } = await supabase
+        .from("profiles")
+        .select("*")
+        .eq("id", session.user.id)
+        .single();
+
+      if (profileError) throw profileError;
+      setProfile(profileData);
+      
+      await fetchDropdownData();
+    } catch (error: any) {
+      console.error("Auth error:", error);
+      navigate("/auth");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const fetchStudentAttendance = async (userIdParam: string) => {
+    try {
+      const { data: studentData } = await supabase
+        .from("students")
+        .select("id")
+        .eq("user_id", userIdParam)
+        .maybeSingle();
+
+      if (studentData) {
+        const { data: attendanceRecords, count } = await supabase
+          .from("attendance")
+          .select("*", { count: "exact" })
+          .eq("student_id", studentData.id)
+          .order("date", { ascending: false });
+
+        const presentCount = attendanceRecords?.filter(a => a.status === "PRESENT").length || 0;
+        const attendancePercentage = count ? Math.round((presentCount / count) * 100) : 0;
+        
+        setStudents([{
+          id: studentData.id,
+          attendanceRecords: attendanceRecords || [],
+          attendancePercentage,
+          presentCount,
+          totalCount: count || 0,
+        }]);
+      }
+    } catch (error: any) {
+      console.error("Error fetching student attendance:", error);
+    }
+  };
+
+  const fetchStudents = async () => {
+    if (!selectedCourse || !selectedYear || !selectedSection) {
+      return;
+    }
+
+    try {
+      const { data, error } = await supabase
+        .from("students")
+        .select(`
+          *,
+          profiles:user_id (
+            name,
+            email
+          )
+        `)
+        .eq("course", selectedCourse)
+        .eq("year", parseInt(selectedYear))
+        .eq("section", selectedSection)
+        .order("roll_number");
+
+      if (error) throw error;
+      setStudents(data || []);
+
+      // Check for existing attendance on selected date
+      if (selectedDate && data && data.length > 0) {
+        const { data: existingAttendance } = await supabase
+          .from("attendance")
+          .select("student_id, status")
+          .eq("date", selectedDate)
+          .eq("subject", selectedSubject)
+          .in("student_id", data.map(s => s.id));
+
+        const initData: any = {};
+        data.forEach((student) => {
+          const existing = existingAttendance?.find(a => a.student_id === student.id);
+          initData[student.id] = existing?.status || "PRESENT";
+        });
+        setAttendanceData(initData);
+      } else {
+        // Initialize with default PRESENT
+        const initData: any = {};
+        data?.forEach((student) => {
+          initData[student.id] = "PRESENT";
+        });
+        setAttendanceData(initData);
+      }
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
+  };
+
+  useEffect(() => {
+    if (!roleLoading && (role === "FACULTY" || role === "ADMIN")) {
+      fetchStudents();
+    }
+  }, [selectedCourse, selectedYear, selectedSection, selectedDate, selectedSubject, role, roleLoading]);
+
+  const handleAttendanceChange = (studentId: string, status: string) => {
+    setAttendanceData((prev: any) => ({
+      ...prev,
+      [studentId]: status,
+    }));
+  };
+
+  const handleSaveAttendance = async () => {
+    if (!selectedSubject) {
+      toast({
+        title: "Error",
+        description: "Please select a subject",
+        variant: "destructive",
+      });
+      return;
+    }
+
+    try {
+      const records = Object.entries(attendanceData).map(([studentId, status]) => ({
+        student_id: studentId,
+        subject: selectedSubject,
+        date: selectedDate,
+        status: status as "PRESENT" | "ABSENT" | "LATE",
+        marked_by: user.id,
+      }));
+
+      const { error } = await supabase
+        .from("attendance")
+        .upsert(records, { onConflict: "student_id,subject,date" });
+
+      if (error) throw error;
+
+      toast({
+        title: "Success",
+        description: "Attendance saved successfully",
+      });
+    } catch (error: any) {
+      toast({
+        title: "Error",
+        description: error.message,
+        variant: "destructive",
+      });
+    }
+  };
+
+  if (loading || roleLoading) {
+    return <LoadingSpinner />;
+  }
+
+  return (
+    <div className="min-h-screen bg-background">
+      <FloatingGeometry variant="default" />
+      <TopTabs userEmail={user?.email} userName={profile?.name} userRole={role || undefined} />
+      <main className="container mx-auto p-6">
+        <div className="mb-6">
+          <h1 className="text-3xl font-bold">Attendance Management</h1>
+          <p className="text-muted-foreground">Mark and track student attendance</p>
+        </div>
+
+        {(role === "FACULTY" || role === "ADMIN") && (
+          <>
+            <Card className="mb-6 glass-effect">
+              <CardHeader>
+                <CardTitle>Select Class & Subject</CardTitle>
+                <CardDescription>Choose the class and subject to mark attendance</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="grid gap-4 md:grid-cols-3">
+                  <div>
+                    <Label>Course</Label>
+                    <Select value={selectedCourse} onValueChange={setSelectedCourse}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select course" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {courses.map((course) => (
+                          <SelectItem key={course.id} value={course.name}>
+                            {course.name} ({course.code})
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Year</Label>
+                    <Select value={selectedYear} onValueChange={setSelectedYear}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select year" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        <SelectItem value="1">1st Year</SelectItem>
+                        <SelectItem value="2">2nd Year</SelectItem>
+                        <SelectItem value="3">3rd Year</SelectItem>
+                        <SelectItem value="4">4th Year</SelectItem>
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Section</Label>
+                    <Select value={selectedSection} onValueChange={setSelectedSection}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select section" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {sections.map((section) => (
+                          <SelectItem key={section.id} value={section.name}>
+                            {section.name}
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Subject</Label>
+                    <Select value={selectedSubject} onValueChange={setSelectedSubject}>
+                      <SelectTrigger>
+                        <SelectValue placeholder="Select subject" />
+                      </SelectTrigger>
+                      <SelectContent>
+                        {subjects.map((subject) => (
+                          <SelectItem key={subject.id} value={subject.name}>
+                            {subject.name} ({subject.code})
+                          </SelectItem>
+                        ))}
+                      </SelectContent>
+                    </Select>
+                  </div>
+                  <div>
+                    <Label>Date</Label>
+                    <Input
+                      type="date"
+                      value={selectedDate}
+                      onChange={(e) => setSelectedDate(e.target.value)}
+                    />
+                  </div>
+                </div>
+              </CardContent>
+            </Card>
+
+            {selectedCourse && selectedYear && selectedSection && students.length > 0 && (
+              <Card>
+                <CardHeader className="flex flex-row items-center justify-between">
+                  <div>
+                    <CardTitle>Mark Attendance</CardTitle>
+                    <CardDescription>{students.length} students in {selectedCourse} - {selectedSection} Year {selectedYear}</CardDescription>
+                  </div>
+                  <Button onClick={handleSaveAttendance} className="gradient-primary">
+                    <Save className="mr-2 h-4 w-4" />
+                    Save Attendance
+                  </Button>
+                </CardHeader>
+                <CardContent>
+                  <div className="space-y-4">
+                    {students.map((student) => (
+                      <div
+                        key={student.id}
+                        className="flex flex-col sm:flex-row items-start sm:items-center justify-between p-4 border rounded-lg glass-effect gap-3"
+                      >
+                        <div className="flex-1">
+                          <p className="font-medium">{student.profiles?.name}</p>
+                          <p className="text-sm text-muted-foreground">
+                            Roll: {student.roll_number}
+                          </p>
+                        </div>
+                        <div className="flex gap-2 flex-wrap">
+                          <Button
+                            variant={attendanceData[student.id] === "PRESENT" ? "default" : "outline"}
+                            size="sm"
+                            onClick={() => handleAttendanceChange(student.id, "PRESENT")}
+                            className="flex-1 sm:flex-none"
+                          >
+                            <CheckCircle className="mr-1 h-4 w-4" />
+                            Present
+                          </Button>
+                          <Button
+                            variant={attendanceData[student.id] === "ABSENT" ? "destructive" : "outline"}
+                            size="sm"
+                            onClick={() => handleAttendanceChange(student.id, "ABSENT")}
+                            className="flex-1 sm:flex-none"
+                          >
+                            <XCircle className="mr-1 h-4 w-4" />
+                            Absent
+                          </Button>
+                          <Button
+                            variant={attendanceData[student.id] === "LATE" ? "secondary" : "outline"}
+                            size="sm"
+                            onClick={() => handleAttendanceChange(student.id, "LATE")}
+                            className="flex-1 sm:flex-none"
+                          >
+                            <Clock className="mr-1 h-4 w-4" />
+                            Late
+                          </Button>
+                        </div>
+                      </div>
+                    ))}
+                  </div>
+                </CardContent>
+              </Card>
+            )}
+
+            {selectedCourse && selectedYear && selectedSection && students.length === 0 && (
+              <Card className="glass-effect">
+                <CardContent className="py-12">
+                  <p className="text-center text-muted-foreground">
+                    No students found in this class. Please add students from Student Management.
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+            
+            {(!selectedCourse || !selectedYear || !selectedSection) && (
+              <Card className="glass-effect">
+                <CardContent className="py-12">
+                  <p className="text-center text-muted-foreground">
+                    Select class details above to load students and mark attendance
+                  </p>
+                </CardContent>
+              </Card>
+            )}
+          </>
+        )}
+
+        {role === "STUDENT" && students.length > 0 && (
+          <div className="space-y-6">
+            <Card className="glass-effect">
+              <CardHeader>
+                <CardTitle>My Attendance Overview</CardTitle>
+                <CardDescription>Track your attendance percentage</CardDescription>
+              </CardHeader>
+              <CardContent>
+                {students[0] && (
+                  <div className="space-y-4">
+                    <div className="flex items-center justify-between">
+                      <div>
+                        <p className="text-2xl font-bold">
+                          {students[0].attendancePercentage}%
+                        </p>
+                        <p className="text-sm text-muted-foreground">
+                          {students[0].presentCount} / {students[0].totalCount} days present
+                        </p>
+                      </div>
+                      {students[0].attendancePercentage < 75 ? (
+                        <AlertTriangle className="h-12 w-12 text-destructive" />
+                      ) : (
+                        <CheckCircle className="h-12 w-12 text-green-600" />
+                      )}
+                    </div>
+                    <Progress value={students[0].attendancePercentage} className="h-3" />
+                    {students[0].attendancePercentage < 75 && (
+                      <div className="bg-destructive/10 border border-destructive/20 rounded-lg p-4">
+                        <p className="text-sm font-medium text-destructive">
+                          ⚠️ Warning: Your attendance is below 75%
+                        </p>
+                        <p className="text-xs text-muted-foreground mt-1">
+                          You need to improve your attendance to meet the minimum requirement.
+                        </p>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </CardContent>
+            </Card>
+
+            <Card className="glass-effect">
+              <CardHeader>
+                <CardTitle>Attendance History</CardTitle>
+                <CardDescription>Your recent attendance records</CardDescription>
+              </CardHeader>
+              <CardContent>
+                <div className="space-y-2">
+                  {students[0]?.attendanceRecords?.slice(0, 10).map((record: any) => (
+                    <div key={record.id} className="flex items-center justify-between p-3 border rounded-lg">
+                      <div>
+                        <p className="font-medium">{record.subject}</p>
+                        <p className="text-sm text-muted-foreground">
+                          {new Date(record.date).toLocaleDateString()}
+                        </p>
+                      </div>
+                      <Badge variant={
+                        record.status === "PRESENT" ? "default" :
+                        record.status === "LATE" ? "secondary" : "destructive"
+                      }>
+                        {record.status}
+                      </Badge>
+                    </div>
+                  ))}
+                  {students[0]?.attendanceRecords?.length === 0 && (
+                    <p className="text-center text-muted-foreground py-8">
+                      No attendance records yet
+                    </p>
+                  )}
+                </div>
+              </CardContent>
+            </Card>
+          </div>
+        )}
+      </main>
+    </div>
+  );
+}
